@@ -1,6 +1,6 @@
 # HTTP запросы через SOCKS5 прокси на Go
 
-Простая программа на Go для выполнения HTTP запросов через SOCKS5 прокси.
+Простая программа на Go для выполнения HTTP запросов через SOCKS5 прокси. Прокси **обязателен** и берется из переменных окружения или `.env` файла.
 
 ## Установка зависимостей
 
@@ -10,26 +10,38 @@ go mod download
 
 ## Использование
 
-### С указанием прокси в аргументах:
+### Настройка прокси
 
-```bash
-go run main.go <target_url> <socks5_proxy>
-```
+Прокси настраивается через переменную окружения `SOCKS5_PROXY` или через `.env` файл (для dev окружения).
 
-Пример:
-
-```bash
-go run main.go https://httpbin.org/ip socks5://127.0.0.1:1080
-```
-
-### С использованием переменной окружения:
+#### Вариант 1: Переменная окружения
 
 ```bash
 export SOCKS5_PROXY=socks5://127.0.0.1:1080
 go run main.go https://httpbin.org/ip
 ```
 
-### Без прокси (прямое соединение):
+#### Вариант 2: .env файл (для dev)
+
+Создайте файл `.env` в корне проекта:
+
+```env
+SOCKS5_PROXY=socks5://127.0.0.1:1080
+```
+
+Затем запустите:
+
+```bash
+go run main.go https://httpbin.org/ip
+```
+
+### Запуск программы
+
+```bash
+go run main.go <target_url>
+```
+
+Пример:
 
 ```bash
 go run main.go https://httpbin.org/ip
@@ -37,18 +49,31 @@ go run main.go https://httpbin.org/ip
 
 ## Примеры
 
-Получить ваш IP адрес через прокси:
+### Базовый запрос
 
 ```bash
-go run main.go https://httpbin.org/ip socks5://127.0.0.1:1080
+go run main.go https://httpbin.org/ip
 ```
 
-Запрос с аутентификацией (если прокси поддерживает):
+### Запрос с аутентификацией прокси
+
+В `.env` файле или переменной окружения:
+
+```env
+SOCKS5_PROXY=socks5://username:password@proxy.example.com:1080
+```
+
+Или:
 
 ```bash
-# Формат: socks5://username:password@host:port
-go run main.go https://example.com socks5://user:pass@127.0.0.1:1080
+export SOCKS5_PROXY=socks5://username:password@proxy.example.com:1080
+go run main.go https://example.com
 ```
+
+### Формат URL прокси
+
+- Без аутентификации: `socks5://host:port` или `host:port`
+- С аутентификацией: `socks5://username:password@host:port`
 
 ## Сборка
 
@@ -61,5 +86,10 @@ go build -o http-proxy main.go
 Затем запуск:
 
 ```bash
-./http-proxy https://httpbin.org/ip socks5://127.0.0.1:1080
+./http-proxy https://httpbin.org/ip
 ```
+
+## Требования
+
+- Прокси **обязателен** - программа не будет работать без него
+- Переменная окружения `SOCKS5_PROXY` или файл `.env` должны быть настроены

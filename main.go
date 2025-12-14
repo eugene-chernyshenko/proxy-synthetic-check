@@ -2,24 +2,26 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
 
+	"github.com/joho/godotenv"
 	"golang.org/x/net/proxy"
 )
 
-// hasScheme проверяет, содержит ли строка схему URL, используя url.Parse
+// hasScheme checks if a string contains a URL scheme using url.Parse
 func hasScheme(s string) bool {
 	u, err := url.Parse(s)
 	return err == nil && u.Scheme != ""
 }
 
-// maskAuth скрывает пароль в URL для безопасного вывода
+// maskAuth hides password in URL for safe output
 func maskAuth(s string) string {
 	u, err := url.Parse(s)
 	if err != nil {
@@ -31,106 +33,98 @@ func maskAuth(s string) string {
 	return u.String()
 }
 
+func loadEnv() {
+	// Load .env file if it exists (for dev environment)
+	// Ignore error if file is not found
+	_ = godotenv.Load()
+}
+
+func getProxyURL() (string, error) {
+	// Try to get from environment variable first
+	proxyURL := os.Getenv("SOCKS5_PROXY")
+	if proxyURL == "" {
+		return "", errors.New("SOCKS5_PROXY is not set. Set SOCKS5_PROXY environment variable or create .env file")
+	}
+	return proxyURL, nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go <target_url> [socks5_proxy]")
-		fmt.Println("Example: go run main.go https://httpbin.org/ip socks5://127.0.0.1:1080")
+		log.Printf("Usage: go run main.go <target_url>")
+		log.Printf("Example: go run main.go https://httpbin.org/ip")
+		log.Printf("Proxy is taken from SOCKS5_PROXY environment variable or .env file")
 		os.Exit(1)
 	}
+
+	// Load environment variables from .env file (if exists)
+	loadEnv()
 
 	targetURL := os.Args[1]
-	var proxyURL string
 
-	if len(os.Args) >= 3 {
-		proxyURL = os.Args[2]
-	} else {
-		// Использовать переменную окружения, если указана
-		proxyURL = os.Getenv("SOCKS5_PROXY")
+	// Get proxy URL from environment variables
+	proxyURL, err := getProxyURL()
+	if err != nil {
+		log.Fatalf("Error getting proxy: %v", err)
 	}
 
-	// Создаем HTTP клиент
-	var client *http.Client
+	// Add socks5:// scheme if not specified
+	if !hasScheme(proxyURL) {
+		proxyURL = "socks5://" + proxyURL
+	}
 
-	if proxyURL != "" {
-		// Если схема не указана, добавляем socks5://
-		if !hasScheme(proxyURL) {
-			proxyURL = "socks5://" + proxyURL
-		}
+	log.Printf("Using SOCKS5 proxy: %s", maskAuth(proxyURL))
 
-		fmt.Printf("Используется SOCKS5 прокси: %s\n", maskAuth(proxyURL))
+	// Parse proxy URL
+	proxyURI, err := url.Parse(proxyURL)
+	if err != nil {
+		log.Fatalf("Error parsing proxy URL: %v", err)
+	}
 
-		// Парсим URL прокси
-		proxyURI, err := url.Parse(proxyURL)
-		if err != nil {
-			fmt.Printf("Ошибка парсинга URL прокси: %v\n", err)
-			os.Exit(1)
-		}
+	// Extract proxy address (host:port)
+	proxyAddr := proxyURI.Host
+	if proxyAddr == "" {
+		log.Fatal("Error: proxy address (host:port) is not specified")
+	}
 
-		// Извлекаем адрес прокси (host:port)
-		proxyAddr := proxyURI.Host
-		if proxyAddr == "" {
-			fmt.Printf("Ошибка: не указан адрес прокси (host:port)\n")
-			os.Exit(1)
-		}
-
-		// Извлекаем учетные данные для аутентификации
-		var auth *proxy.Auth
-		if proxyURI.User != nil {
-			password, _ := proxyURI.User.Password()
-			auth = &proxy.Auth{
-				User:     proxyURI.User.Username(),
-				Password: password,
-			}
-		}
-
-		// Создаем SOCKS5 dialer
-		dialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
-		if err != nil {
-			fmt.Printf("Ошибка создания SOCKS5 dialer: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Создаем HTTP транспорт с SOCKS5 dialer
-		transport := &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
-		}
-
-		client = &http.Client{
-			Transport: transport,
-			Timeout:   30 * time.Second,
-		}
-	} else {
-		fmt.Println("Прокси не указан, используется прямое соединение")
-		client = &http.Client{
-			Timeout: 30 * time.Second,
+	// Extract authentication credentials
+	var auth *proxy.Auth
+	if proxyURI.User != nil {
+		password, _ := proxyURI.User.Password()
+		auth = &proxy.Auth{
+			User:     proxyURI.User.Username(),
+			Password: password,
 		}
 	}
 
-	// Выполняем запрос
-	fmt.Printf("Выполняется запрос к: %s\n", targetURL)
+	// Create SOCKS5 dialer
+	dialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
+	if err != nil {
+		log.Fatalf("Error creating SOCKS5 dialer: %v", err)
+	}
+
+	// Create HTTP transport with SOCKS5 dialer
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.Dial(network, addr)
+		},
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+
+	// Execute request
+	log.Printf("Making request to: %s", targetURL)
 	resp, err := client.Get(targetURL)
 	if err != nil {
-		fmt.Printf("Ошибка выполнения запроса: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Error making request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// Читаем ответ
-	body, err := io.ReadAll(resp.Body)
+	// Read and discard response body to free up connection
+	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
-		fmt.Printf("Ошибка чтения ответа: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Error reading response: %v", err)
 	}
-
-	fmt.Printf("\nСтатус ответа: %s\n", resp.Status)
-	fmt.Printf("\nЗаголовки ответа:\n")
-	for key, values := range resp.Header {
-		for _, value := range values {
-			fmt.Printf("  %s: %s\n", key, value)
-		}
-	}
-
-	fmt.Printf("\nТело ответа:\n%s\n", string(body))
 }
