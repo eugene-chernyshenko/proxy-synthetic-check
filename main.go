@@ -199,6 +199,11 @@ func categorizeError(err error) (errorType, httpStatusCode string) {
 		return "dns_error", ""
 	}
 
+	// Check for EOF errors (connection closed unexpectedly)
+	if err == io.EOF || strings.Contains(errLower, "eof") {
+		return "connection_error", ""
+	}
+
 	// Check for connection errors
 	if strings.Contains(errLower, "connection refused") ||
 		strings.Contains(errLower, "connection reset") ||
