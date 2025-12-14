@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -17,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/net/proxy"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -38,20 +38,20 @@ var (
 	)
 )
 
-// ProxyConfig represents the JSON configuration file structure
+// ProxyConfig represents the YAML configuration file structure
 type ProxyConfig struct {
-	TargetURL       string  `json:"target_url"`
-	RequestInterval int     `json:"request_interval_ms"`
-	RequestTimeout  int     `json:"request_timeout"`
-	MetricsPort     int     `json:"metrics_port"`
-	Proxies         []Proxy `json:"proxies"`
+	TargetURL       string  `yaml:"target_url"`
+	RequestInterval int     `yaml:"request_interval_ms"`
+	RequestTimeout  int     `yaml:"request_timeout"`
+	MetricsPort     int     `yaml:"metrics_port"`
+	Proxies         []Proxy `yaml:"proxies"`
 }
 
 // Proxy represents a single proxy configuration
 type Proxy struct {
-	Name string `json:"name"`
-	Type string `json:"type"` // socks5, http
-	URL  string `json:"url"`
+	Name string `yaml:"name"`
+	Type string `yaml:"type"` // socks5, http
+	URL  string `yaml:"url"`
 }
 
 func init() {
@@ -72,13 +72,13 @@ func maskAuth(s string) string {
 }
 
 func loadProxyConfig() (*ProxyConfig, error) {
-	data, err := os.ReadFile("proxies.json")
+	data, err := os.ReadFile("proxies.yaml")
 	if err != nil {
 		return nil, err
 	}
 
 	var config ProxyConfig
-	if err := json.Unmarshal(data, &config); err != nil {
+	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
 
@@ -267,7 +267,7 @@ func runProxy(proxyConfig Proxy, targetURL string, requestInterval, requestTimeo
 }
 
 func main() {
-	// Load JSON config
+	// Load YAML config
 	config, err := loadProxyConfig()
 	if err != nil {
 		log.Fatalf("Error loading proxy configuration: %v", err)
