@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -13,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/net/proxy"
@@ -25,7 +25,7 @@ var (
 			Name: "requests_total",
 			Help: "Total number of requests",
 		},
-		[]string{"status", "error_type", "http_status_code"},
+		[]string{"proxy_type", "proxy_protocol", "status", "error_type", "http_status_code"},
 	)
 
 	requestDuration = prometheus.NewHistogramVec(
@@ -34,19 +34,29 @@ var (
 			Help:    "Request latency distribution",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{},
+		[]string{"proxy_type", "proxy_protocol"},
 	)
 )
+
+// ProxyConfig represents the JSON configuration file structure
+type ProxyConfig struct {
+	TargetURL       string  `json:"target_url"`
+	RequestInterval int     `json:"request_interval_ms"`
+	RequestTimeout  int     `json:"request_timeout"`
+	MetricsPort     int     `json:"metrics_port"`
+	Proxies         []Proxy `json:"proxies"`
+}
+
+// Proxy represents a single proxy configuration
+type Proxy struct {
+	Name string `json:"name"`
+	Type string `json:"type"` // socks5, http
+	URL  string `json:"url"`
+}
 
 func init() {
 	prometheus.MustRegister(requestsTotal)
 	prometheus.MustRegister(requestDuration)
-}
-
-// hasScheme checks if a string contains a URL scheme using url.Parse
-func hasScheme(s string) bool {
-	u, err := url.Parse(s)
-	return err == nil && u.Scheme != ""
 }
 
 // maskAuth hides password in URL for safe output
@@ -61,71 +71,80 @@ func maskAuth(s string) string {
 	return u.String()
 }
 
-func loadEnv() {
-	// Load .env file if it exists (for dev environment)
-	// Ignore error if file is not found
-	_ = godotenv.Load()
-}
-
-func getProxyURL() (string, error) {
-	// Try to get from environment variable first
-	proxyURL := os.Getenv("SOCKS5_PROXY")
-	if proxyURL == "" {
-		return "", errors.New("SOCKS5_PROXY is not set. Set SOCKS5_PROXY environment variable or create .env file")
-	}
-	return proxyURL, nil
-}
-
-func getTargetURL() (string, error) {
-	targetURL := os.Getenv("TARGET_URL")
-	if targetURL == "" {
-		return "", errors.New("TARGET_URL is not set. Set TARGET_URL environment variable or create .env file")
-	}
-	return targetURL, nil
-}
-
-func getRequestInterval() (time.Duration, error) {
-	intervalStr := os.Getenv("REQUEST_INTERVAL_MS")
-	if intervalStr == "" {
-		return 0, errors.New("REQUEST_INTERVAL_MS is not set. Set REQUEST_INTERVAL_MS environment variable or create .env file")
-	}
-	intervalMs, err := strconv.Atoi(intervalStr)
+func loadProxyConfig() (*ProxyConfig, error) {
+	data, err := os.ReadFile("proxies.json")
 	if err != nil {
-		return 0, errors.New("REQUEST_INTERVAL_MS must be a valid integer (milliseconds)")
+		return nil, err
 	}
-	if intervalMs <= 0 {
-		return 0, errors.New("REQUEST_INTERVAL_MS must be greater than 0")
+
+	var config ProxyConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, err
 	}
-	return time.Duration(intervalMs) * time.Millisecond, nil
+
+	if len(config.Proxies) == 0 {
+		return nil, errors.New("no proxies configured in config file")
+	}
+
+	return &config, nil
 }
 
-func getRequestTimeout() (time.Duration, error) {
-	timeoutStr := os.Getenv("REQUEST_TIMEOUT")
-	if timeoutStr == "" {
-		// Default timeout 30 seconds
-		return 30 * time.Second, nil
-	}
-	timeout, err := strconv.Atoi(timeoutStr)
+// createProxyTransport creates HTTP transport based on proxy type
+func createProxyTransport(proxyType, proxyURL string) (*http.Transport, error) {
+	proxyURI, err := url.Parse(proxyURL)
 	if err != nil {
-		return 0, errors.New("REQUEST_TIMEOUT must be a valid integer (seconds)")
+		return nil, err
 	}
-	if timeout <= 0 {
-		return 0, errors.New("REQUEST_TIMEOUT must be greater than 0")
-	}
-	return time.Duration(timeout) * time.Second, nil
-}
 
-func getMetricsPort() int {
-	portStr := os.Getenv("METRICS_PORT")
-	if portStr == "" {
-		return 8080
+	// Ensure scheme is present
+	if proxyURI.Scheme == "" {
+		if proxyType == "socks5" {
+			proxyURL = "socks5://" + proxyURL
+		} else if proxyType == "http" {
+			proxyURL = "http://" + proxyURL
+		}
+		proxyURI, err = url.Parse(proxyURL)
+		if err != nil {
+			return nil, err
+		}
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 {
-		log.Printf("Invalid METRICS_PORT, using default 8080")
-		return 8080
+
+	switch strings.ToLower(proxyType) {
+	case "socks5":
+		proxyAddr := proxyURI.Host
+		if proxyAddr == "" {
+			return nil, errors.New("proxy address (host:port) is not specified")
+		}
+
+		var auth *proxy.Auth
+		if proxyURI.User != nil {
+			password, _ := proxyURI.User.Password()
+			auth = &proxy.Auth{
+				User:     proxyURI.User.Username(),
+				Password: password,
+			}
+		}
+
+		dialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
+		if err != nil {
+			return nil, err
+		}
+
+		return &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialer.Dial(network, addr)
+			},
+		}, nil
+
+	case "http":
+		// HTTP proxy using http.ProxyURL
+		return &http.Transport{
+			Proxy: http.ProxyURL(proxyURI),
+		}, nil
+
+	default:
+		return nil, errors.New("unsupported proxy type: " + proxyType)
 	}
-	return port
 }
 
 // categorizeError categorizes errors into types for metrics
@@ -179,7 +198,7 @@ func categorizeError(err error) (errorType, httpStatusCode string) {
 	return "unknown_error", ""
 }
 
-func makeRequest(client *http.Client, targetURL string) {
+func makeRequest(client *http.Client, targetURL, proxyName, proxyType string) {
 	start := time.Now()
 
 	resp, err := client.Get(targetURL)
@@ -188,9 +207,9 @@ func makeRequest(client *http.Client, targetURL string) {
 	if err != nil {
 		// Categorize error
 		errorType, _ := categorizeError(err)
-		requestsTotal.WithLabelValues("error", errorType, "").Inc()
-		requestDuration.WithLabelValues().Observe(duration)
-		log.Printf("Error making request to %s: %v", targetURL, err)
+		requestsTotal.WithLabelValues(proxyName, proxyType, "error", errorType, "").Inc()
+		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
+		log.Printf("[%s] Error making request to %s: %v", proxyName, targetURL, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -199,103 +218,69 @@ func makeRequest(client *http.Client, targetURL string) {
 	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		// Error reading response body
-		requestsTotal.WithLabelValues("error", "read_error", "").Inc()
-		requestDuration.WithLabelValues().Observe(duration)
-		log.Printf("Error reading response: %v", err)
+		requestsTotal.WithLabelValues(proxyName, proxyType, "error", "read_error", "").Inc()
+		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
+		log.Printf("[%s] Error reading response: %v", proxyName, err)
 		return
 	}
 
 	// Check HTTP status code
 	if resp.StatusCode >= 400 {
 		statusCode := strconv.Itoa(resp.StatusCode)
-		requestsTotal.WithLabelValues("error", "http_error", statusCode).Inc()
-		requestDuration.WithLabelValues().Observe(duration)
-		log.Printf("HTTP error %d for request to %s", resp.StatusCode, targetURL)
+		requestsTotal.WithLabelValues(proxyName, proxyType, "error", "http_error", statusCode).Inc()
+		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
+		log.Printf("[%s] HTTP error %d for request to %s", proxyName, resp.StatusCode, targetURL)
 		return
 	}
 
 	// Success
-	requestsTotal.WithLabelValues("success", "", "").Inc()
-	requestDuration.WithLabelValues().Observe(duration)
+	requestsTotal.WithLabelValues(proxyName, proxyType, "success", "", "").Inc()
+	requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
 }
 
-func main() {
-	// Load environment variables from .env file (if exists)
-	loadEnv()
-
-	// Get configuration from environment variables
-	targetURL, err := getTargetURL()
+// runProxy starts a proxy runner that sends requests at specified interval
+func runProxy(proxyConfig Proxy, targetURL string, requestInterval, requestTimeout time.Duration) {
+	// Create transport for this proxy
+	transport, err := createProxyTransport(proxyConfig.Type, proxyConfig.URL)
 	if err != nil {
-		log.Fatalf("Error getting target URL: %v", err)
-	}
-
-	proxyURL, err := getProxyURL()
-	if err != nil {
-		log.Fatalf("Error getting proxy: %v", err)
-	}
-
-	requestInterval, err := getRequestInterval()
-	if err != nil {
-		log.Fatalf("Error getting request interval: %v", err)
-	}
-
-	requestTimeout, err := getRequestTimeout()
-	if err != nil {
-		log.Fatalf("Error getting request timeout: %v", err)
-	}
-
-	// Add socks5:// scheme if not specified
-	if !hasScheme(proxyURL) {
-		proxyURL = "socks5://" + proxyURL
-	}
-
-	metricsPort := getMetricsPort()
-
-	log.Printf("Configuration:")
-	log.Printf("  Target URL: %s", targetURL)
-	log.Printf("  SOCKS5 proxy: %s", maskAuth(proxyURL))
-	log.Printf("  Request interval: %v", requestInterval)
-	log.Printf("  Request timeout: %v", requestTimeout)
-	log.Printf("  Metrics port: %d", metricsPort)
-
-	// Parse proxy URL
-	proxyURI, err := url.Parse(proxyURL)
-	if err != nil {
-		log.Fatalf("Error parsing proxy URL: %v", err)
-	}
-
-	// Extract proxy address (host:port)
-	proxyAddr := proxyURI.Host
-	if proxyAddr == "" {
-		log.Fatal("Error: proxy address (host:port) is not specified")
-	}
-
-	// Extract authentication credentials
-	var auth *proxy.Auth
-	if proxyURI.User != nil {
-		password, _ := proxyURI.User.Password()
-		auth = &proxy.Auth{
-			User:     proxyURI.User.Username(),
-			Password: password,
-		}
-	}
-
-	// Create SOCKS5 dialer
-	dialer, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
-	if err != nil {
-		log.Fatalf("Error creating SOCKS5 dialer: %v", err)
-	}
-
-	// Create HTTP transport with SOCKS5 dialer
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
-		},
+		log.Fatalf("[%s] Error creating proxy transport: %v", proxyConfig.Name, err)
 	}
 
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   requestTimeout,
+	}
+
+	log.Printf("[%s] Starting proxy runner (type: %s, url: %s)", proxyConfig.Name, proxyConfig.Type, maskAuth(proxyConfig.URL))
+
+	// Create ticker for this proxy
+	ticker := time.NewTicker(requestInterval)
+	defer ticker.Stop()
+
+	// Send initial request immediately
+	go makeRequest(client, targetURL, proxyConfig.Name, proxyConfig.Type)
+
+	// Send requests at intervals
+	for range ticker.C {
+		go makeRequest(client, targetURL, proxyConfig.Name, proxyConfig.Type)
+	}
+}
+
+func main() {
+	// Load JSON config
+	config, err := loadProxyConfig()
+	if err != nil {
+		log.Fatalf("Error loading proxy configuration: %v", err)
+	}
+
+	targetURL := config.TargetURL
+	requestInterval := time.Duration(config.RequestInterval) * time.Millisecond
+	requestTimeout := time.Duration(config.RequestTimeout) * time.Second
+
+	// Default metrics port to 8080 if not specified
+	metricsPort := config.MetricsPort
+	if metricsPort == 0 {
+		metricsPort = 8080
 	}
 
 	// Start metrics server
@@ -308,17 +293,18 @@ func main() {
 		}
 	}()
 
-	log.Printf("Starting to send requests every %v...", requestInterval)
+	log.Printf("Configuration:")
+	log.Printf("  Target URL: %s", targetURL)
+	log.Printf("  Request interval: %v", requestInterval)
+	log.Printf("  Request timeout: %v", requestTimeout)
+	log.Printf("  Metrics port: %d", metricsPort)
+	log.Printf("  Number of proxies: %d", len(config.Proxies))
 
-	// Create ticker for sending requests at specified interval
-	ticker := time.NewTicker(requestInterval)
-	defer ticker.Stop()
-
-	// Send initial request immediately
-	go makeRequest(client, targetURL)
-
-	// Send requests at intervals in separate goroutines
-	for range ticker.C {
-		go makeRequest(client, targetURL)
+	// Start each proxy in a separate goroutine
+	for _, proxyConfig := range config.Proxies {
+		go runProxy(proxyConfig, targetURL, requestInterval, requestTimeout)
 	}
+
+	// Keep main goroutine alive
+	select {}
 }

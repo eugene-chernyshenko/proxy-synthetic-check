@@ -6,10 +6,7 @@ toolchain go1.24.11
 
 require golang.org/x/net v0.43.0
 
-require (
-	github.com/joho/godotenv v1.5.1
-	github.com/prometheus/client_golang v1.23.2
-)
+require github.com/prometheus/client_golang v1.23.2
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
