@@ -1,95 +1,111 @@
-# HTTP запросы через SOCKS5 прокси на Go
+# HTTP requests through SOCKS5 proxy on Go
 
-Простая программа на Go для выполнения HTTP запросов через SOCKS5 прокси. Прокси **обязателен** и берется из переменных окружения или `.env` файла.
+A Go program for sending HTTP requests through SOCKS5 proxy at specified intervals. Requests are sent in parallel using goroutines.
 
-## Установка зависимостей
+## Installation
 
 ```bash
 go mod download
 ```
 
-## Использование
+## Configuration
 
-### Настройка прокси
+All configuration is done through environment variables or `.env` file (for dev environment).
 
-Прокси настраивается через переменную окружения `SOCKS5_PROXY` или через `.env` файл (для dev окружения).
+### Required environment variables:
 
-#### Вариант 1: Переменная окружения
+- `SOCKS5_PROXY` - SOCKS5 proxy URL (required)
+- `TARGET_URL` - Target URL to send requests to (required)
+- `REQUEST_INTERVAL_MS` - Interval between requests in milliseconds (required)
+
+### Optional environment variables:
+
+- `REQUEST_TIMEOUT` - Request timeout in seconds (default: 30)
+
+## Usage
+
+### Option 1: Environment variables
 
 ```bash
 export SOCKS5_PROXY=socks5://127.0.0.1:1080
-go run main.go https://httpbin.org/ip
+export TARGET_URL=https://httpbin.org/ip
+export REQUEST_INTERVAL_MS=1000
+export REQUEST_TIMEOUT=30
+go run main.go
 ```
 
-#### Вариант 2: .env файл (для dev)
+### Option 2: .env file (for dev)
 
-Создайте файл `.env` в корне проекта:
+Create `.env` file in project root:
 
 ```env
 SOCKS5_PROXY=socks5://127.0.0.1:1080
+TARGET_URL=https://httpbin.org/ip
+REQUEST_INTERVAL_MS=1000
+REQUEST_TIMEOUT=30
 ```
 
-Затем запустите:
+Then run:
 
 ```bash
-go run main.go https://httpbin.org/ip
+go run main.go
 ```
 
-### Запуск программы
+## Examples
 
-```bash
-go run main.go <target_url>
+### Basic usage
+
+```env
+SOCKS5_PROXY=socks5://127.0.0.1:1080
+TARGET_URL=https://httpbin.org/ip
+REQUEST_INTERVAL_MS=500
 ```
 
-Пример:
-
-```bash
-go run main.go https://httpbin.org/ip
-```
-
-## Примеры
-
-### Базовый запрос
-
-```bash
-go run main.go https://httpbin.org/ip
-```
-
-### Запрос с аутентификацией прокси
-
-В `.env` файле или переменной окружения:
+### With proxy authentication
 
 ```env
 SOCKS5_PROXY=socks5://username:password@proxy.example.com:1080
+TARGET_URL=https://example.com/api/endpoint
+REQUEST_INTERVAL_MS=1000
+REQUEST_TIMEOUT=60
 ```
 
-Или:
+### High frequency requests (100ms interval)
 
-```bash
-export SOCKS5_PROXY=socks5://username:password@proxy.example.com:1080
-go run main.go https://example.com
+```env
+SOCKS5_PROXY=socks5://127.0.0.1:1080
+TARGET_URL=https://api.example.com/check
+REQUEST_INTERVAL_MS=100
+REQUEST_TIMEOUT=10
 ```
 
-### Формат URL прокси
+## Proxy URL format
 
-- Без аутентификации: `socks5://host:port` или `host:port`
-- С аутентификацией: `socks5://username:password@host:port`
+- Without authentication: `socks5://host:port` or `host:port`
+- With authentication: `socks5://username:password@host:port`
 
-## Сборка
+## How it works
 
-Для создания исполняемого файла:
+- The program sends requests at specified intervals using a ticker
+- Each request runs in a separate goroutine, so requests are executed in parallel
+- If a request takes longer than the interval, multiple requests will run simultaneously
+- The program runs indefinitely until interrupted (Ctrl+C)
+
+## Build
+
+To create an executable:
 
 ```bash
 go build -o http-proxy main.go
 ```
 
-Затем запуск:
+Then run:
 
 ```bash
-./http-proxy https://httpbin.org/ip
+./http-proxy
 ```
 
-## Требования
+## Requirements
 
-- Прокси **обязателен** - программа не будет работать без него
-- Переменная окружения `SOCKS5_PROXY` или файл `.env` должны быть настроены
+- SOCKS5 proxy is required
+- All required environment variables must be set

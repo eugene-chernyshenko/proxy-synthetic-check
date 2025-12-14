@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -48,23 +49,84 @@ func getProxyURL() (string, error) {
 	return proxyURL, nil
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		log.Printf("Usage: go run main.go <target_url>")
-		log.Printf("Example: go run main.go https://httpbin.org/ip")
-		log.Printf("Proxy is taken from SOCKS5_PROXY environment variable or .env file")
-		os.Exit(1)
+func getTargetURL() (string, error) {
+	targetURL := os.Getenv("TARGET_URL")
+	if targetURL == "" {
+		return "", errors.New("TARGET_URL is not set. Set TARGET_URL environment variable or create .env file")
 	}
+	return targetURL, nil
+}
 
+func getRequestInterval() (time.Duration, error) {
+	intervalStr := os.Getenv("REQUEST_INTERVAL_MS")
+	if intervalStr == "" {
+		return 0, errors.New("REQUEST_INTERVAL_MS is not set. Set REQUEST_INTERVAL_MS environment variable or create .env file")
+	}
+	intervalMs, err := strconv.Atoi(intervalStr)
+	if err != nil {
+		return 0, errors.New("REQUEST_INTERVAL_MS must be a valid integer (milliseconds)")
+	}
+	if intervalMs <= 0 {
+		return 0, errors.New("REQUEST_INTERVAL_MS must be greater than 0")
+	}
+	return time.Duration(intervalMs) * time.Millisecond, nil
+}
+
+func getRequestTimeout() (time.Duration, error) {
+	timeoutStr := os.Getenv("REQUEST_TIMEOUT")
+	if timeoutStr == "" {
+		// Default timeout 30 seconds
+		return 30 * time.Second, nil
+	}
+	timeout, err := strconv.Atoi(timeoutStr)
+	if err != nil {
+		return 0, errors.New("REQUEST_TIMEOUT must be a valid integer (seconds)")
+	}
+	if timeout <= 0 {
+		return 0, errors.New("REQUEST_TIMEOUT must be greater than 0")
+	}
+	return time.Duration(timeout) * time.Second, nil
+}
+
+func makeRequest(client *http.Client, targetURL string) {
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		log.Printf("Error making request to %s: %v", targetURL, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read and discard response body to free up connection
+	_, err = io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		log.Printf("Error reading response: %v", err)
+		return
+	}
+}
+
+func main() {
 	// Load environment variables from .env file (if exists)
 	loadEnv()
 
-	targetURL := os.Args[1]
+	// Get configuration from environment variables
+	targetURL, err := getTargetURL()
+	if err != nil {
+		log.Fatalf("Error getting target URL: %v", err)
+	}
 
-	// Get proxy URL from environment variables
 	proxyURL, err := getProxyURL()
 	if err != nil {
 		log.Fatalf("Error getting proxy: %v", err)
+	}
+
+	requestInterval, err := getRequestInterval()
+	if err != nil {
+		log.Fatalf("Error getting request interval: %v", err)
+	}
+
+	requestTimeout, err := getRequestTimeout()
+	if err != nil {
+		log.Fatalf("Error getting request timeout: %v", err)
 	}
 
 	// Add socks5:// scheme if not specified
@@ -72,7 +134,11 @@ func main() {
 		proxyURL = "socks5://" + proxyURL
 	}
 
-	log.Printf("Using SOCKS5 proxy: %s", maskAuth(proxyURL))
+	log.Printf("Configuration:")
+	log.Printf("  Target URL: %s", targetURL)
+	log.Printf("  SOCKS5 proxy: %s", maskAuth(proxyURL))
+	log.Printf("  Request interval: %v", requestInterval)
+	log.Printf("  Request timeout: %v", requestTimeout)
 
 	// Parse proxy URL
 	proxyURI, err := url.Parse(proxyURL)
@@ -111,20 +177,20 @@ func main() {
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   30 * time.Second,
+		Timeout:   requestTimeout,
 	}
 
-	// Execute request
-	log.Printf("Making request to: %s", targetURL)
-	resp, err := client.Get(targetURL)
-	if err != nil {
-		log.Fatalf("Error making request: %v", err)
-	}
-	defer resp.Body.Close()
+	log.Printf("Starting to send requests every %v...", requestInterval)
 
-	// Read and discard response body to free up connection
-	_, err = io.Copy(io.Discard, resp.Body)
-	if err != nil {
-		log.Fatalf("Error reading response: %v", err)
+	// Create ticker for sending requests at specified interval
+	ticker := time.NewTicker(requestInterval)
+	defer ticker.Stop()
+
+	// Send initial request immediately
+	go makeRequest(client, targetURL)
+
+	// Send requests at intervals in separate goroutines
+	for range ticker.C {
+		go makeRequest(client, targetURL)
 	}
 }
