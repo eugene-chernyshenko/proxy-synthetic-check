@@ -10,11 +10,38 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/net/proxy"
 )
+
+var (
+	requestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "requests_total",
+			Help: "Total number of requests",
+		},
+		[]string{"status", "error_type", "http_status_code"},
+	)
+
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "request_duration_seconds",
+			Help:    "Request latency distribution",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(requestsTotal)
+	prometheus.MustRegister(requestDuration)
+}
 
 // hasScheme checks if a string contains a URL scheme using url.Parse
 func hasScheme(s string) bool {
@@ -88,9 +115,81 @@ func getRequestTimeout() (time.Duration, error) {
 	return time.Duration(timeout) * time.Second, nil
 }
 
+func getMetricsPort() int {
+	portStr := os.Getenv("METRICS_PORT")
+	if portStr == "" {
+		return 8080
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		log.Printf("Invalid METRICS_PORT, using default 8080")
+		return 8080
+	}
+	return port
+}
+
+// categorizeError categorizes errors into types for metrics
+func categorizeError(err error) (errorType, httpStatusCode string) {
+	if err == nil {
+		return "", ""
+	}
+
+	errStr := err.Error()
+	errLower := strings.ToLower(errStr)
+
+	// Check for timeout errors
+	if strings.Contains(errLower, "timeout") ||
+		strings.Contains(errLower, "deadline exceeded") ||
+		strings.Contains(errLower, "i/o timeout") {
+		return "timeout", ""
+	}
+
+	// Check for DNS errors
+	if strings.Contains(errLower, "no such host") ||
+		strings.Contains(errLower, "dns") ||
+		strings.Contains(errLower, "name resolution") {
+		return "dns_error", ""
+	}
+
+	// Check for connection errors
+	if strings.Contains(errLower, "connection refused") ||
+		strings.Contains(errLower, "connection reset") ||
+		strings.Contains(errLower, "broken pipe") ||
+		strings.Contains(errLower, "network is unreachable") {
+		return "connection_error", ""
+	}
+
+	// Check for URL errors (which might contain HTTP status codes)
+	if urlErr, ok := err.(*url.Error); ok {
+		if urlErr.Err != nil {
+			// Recursively check the underlying error
+			errType, _ := categorizeError(urlErr.Err)
+			if errType != "" {
+				return errType, ""
+			}
+		}
+	}
+
+	// Default to connection_error for unknown network errors
+	if _, ok := err.(net.Error); ok {
+		return "connection_error", ""
+	}
+
+	// Unknown error type
+	return "unknown_error", ""
+}
+
 func makeRequest(client *http.Client, targetURL string) {
+	start := time.Now()
+
 	resp, err := client.Get(targetURL)
+	duration := time.Since(start).Seconds()
+
 	if err != nil {
+		// Categorize error
+		errorType, _ := categorizeError(err)
+		requestsTotal.WithLabelValues("error", errorType, "").Inc()
+		requestDuration.WithLabelValues().Observe(duration)
 		log.Printf("Error making request to %s: %v", targetURL, err)
 		return
 	}
@@ -99,9 +198,25 @@ func makeRequest(client *http.Client, targetURL string) {
 	// Read and discard response body to free up connection
 	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
+		// Error reading response body
+		requestsTotal.WithLabelValues("error", "read_error", "").Inc()
+		requestDuration.WithLabelValues().Observe(duration)
 		log.Printf("Error reading response: %v", err)
 		return
 	}
+
+	// Check HTTP status code
+	if resp.StatusCode >= 400 {
+		statusCode := strconv.Itoa(resp.StatusCode)
+		requestsTotal.WithLabelValues("error", "http_error", statusCode).Inc()
+		requestDuration.WithLabelValues().Observe(duration)
+		log.Printf("HTTP error %d for request to %s", resp.StatusCode, targetURL)
+		return
+	}
+
+	// Success
+	requestsTotal.WithLabelValues("success", "", "").Inc()
+	requestDuration.WithLabelValues().Observe(duration)
 }
 
 func main() {
@@ -134,11 +249,14 @@ func main() {
 		proxyURL = "socks5://" + proxyURL
 	}
 
+	metricsPort := getMetricsPort()
+
 	log.Printf("Configuration:")
 	log.Printf("  Target URL: %s", targetURL)
 	log.Printf("  SOCKS5 proxy: %s", maskAuth(proxyURL))
 	log.Printf("  Request interval: %v", requestInterval)
 	log.Printf("  Request timeout: %v", requestTimeout)
+	log.Printf("  Metrics port: %d", metricsPort)
 
 	// Parse proxy URL
 	proxyURI, err := url.Parse(proxyURL)
@@ -179,6 +297,16 @@ func main() {
 		Transport: transport,
 		Timeout:   requestTimeout,
 	}
+
+	// Start metrics server
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		addr := ":" + strconv.Itoa(metricsPort)
+		log.Printf("Metrics server starting on %s/metrics", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			log.Fatalf("Error starting metrics server: %v", err)
+		}
+	}()
 
 	log.Printf("Starting to send requests every %v...", requestInterval)
 
