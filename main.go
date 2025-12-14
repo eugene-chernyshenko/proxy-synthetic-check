@@ -25,26 +25,20 @@ var (
 			Name: "requests_total",
 			Help: "Total number of requests",
 		},
-		[]string{"proxy_type", "proxy_protocol", "status", "error_type", "http_status_code"},
+		[]string{"proxy_type", "proxy_protocol", "status", "error"},
 	)
 
-	requestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "request_duration_seconds",
-			Help:    "Request latency distribution",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"proxy_type", "proxy_protocol"},
-	)
+	requestDuration *prometheus.HistogramVec
 )
 
 // ProxyConfig represents the YAML configuration file structure
 type ProxyConfig struct {
-	TargetURL       string  `yaml:"target_url"`
-	RequestInterval int     `yaml:"request_interval_ms"`
-	RequestTimeout  int     `yaml:"request_timeout"`
-	MetricsPort     int     `yaml:"metrics_port"`
-	Proxies         []Proxy `yaml:"proxies"`
+	TargetURL       string    `yaml:"target_url"`
+	RequestInterval int       `yaml:"request_interval_ms"`
+	RequestTimeout  int       `yaml:"request_timeout"`
+	MetricsPort     int       `yaml:"metrics_port"`
+	LatencyBuckets  []float64 `yaml:"latency_buckets,omitempty"` // Optional custom buckets
+	Proxies         []Proxy   `yaml:"proxies"`
 }
 
 // Proxy represents a single proxy configuration
@@ -56,7 +50,6 @@ type Proxy struct {
 
 func init() {
 	prometheus.MustRegister(requestsTotal)
-	prometheus.MustRegister(requestDuration)
 }
 
 // maskAuth hides password in URL for safe output
@@ -87,6 +80,42 @@ func loadProxyConfig() (*ProxyConfig, error) {
 	}
 
 	return &config, nil
+}
+
+// getLatencyBuckets returns latency buckets, using config if provided, otherwise defaults
+func getLatencyBuckets(config *ProxyConfig) []float64 {
+	if len(config.LatencyBuckets) > 0 {
+		return config.LatencyBuckets
+	}
+	// Default buckets with more observability in 0.2-2s range
+	return []float64{
+		0.05, // 50ms - very fast
+		0.1,  // 100ms - fast
+		0.2,  // 200ms - normal
+		0.3,  // 300ms - added for better observability
+		0.4,  // 400ms - added for better observability
+		0.5,  // 500ms - acceptable
+		0.75, // 750ms - added for better observability
+		1.0,  // 1s - slow
+		1.5,  // 1.5s - added for better observability
+		2.0,  // 2s - very slow
+		5.0,  // 5s - critically slow
+		10.0, // 10s - near timeout
+		30.0, // 30s - timeout
+	}
+}
+
+// initRequestDurationMetric initializes the requestDuration metric with custom buckets
+func initRequestDurationMetric(buckets []float64) {
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "request_duration_seconds",
+			Help:    "Request latency distribution",
+			Buckets: buckets,
+		},
+		[]string{"proxy_type", "proxy_protocol"},
+	)
+	prometheus.MustRegister(requestDuration)
 }
 
 // createProxyTransport creates HTTP transport based on proxy type
@@ -207,7 +236,7 @@ func makeRequest(client *http.Client, targetURL, proxyName, proxyType string) {
 	if err != nil {
 		// Categorize error
 		errorType, _ := categorizeError(err)
-		requestsTotal.WithLabelValues(proxyName, proxyType, "error", errorType, "").Inc()
+		requestsTotal.WithLabelValues(proxyName, proxyType, "error", errorType).Inc()
 		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
 		log.Printf("[%s] Error making request to %s: %v", proxyName, targetURL, err)
 		return
@@ -218,7 +247,7 @@ func makeRequest(client *http.Client, targetURL, proxyName, proxyType string) {
 	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		// Error reading response body
-		requestsTotal.WithLabelValues(proxyName, proxyType, "error", "read_error", "").Inc()
+		requestsTotal.WithLabelValues(proxyName, proxyType, "error", "read_error").Inc()
 		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
 		log.Printf("[%s] Error reading response: %v", proxyName, err)
 		return
@@ -226,15 +255,15 @@ func makeRequest(client *http.Client, targetURL, proxyName, proxyType string) {
 
 	// Check HTTP status code
 	if resp.StatusCode >= 400 {
-		statusCode := strconv.Itoa(resp.StatusCode)
-		requestsTotal.WithLabelValues(proxyName, proxyType, "error", "http_error", statusCode).Inc()
+		errorType := "http_" + strconv.Itoa(resp.StatusCode)
+		requestsTotal.WithLabelValues(proxyName, proxyType, "error", errorType).Inc()
 		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
 		log.Printf("[%s] HTTP error %d for request to %s", proxyName, resp.StatusCode, targetURL)
 		return
 	}
 
 	// Success
-	requestsTotal.WithLabelValues(proxyName, proxyType, "success", "", "").Inc()
+	requestsTotal.WithLabelValues(proxyName, proxyType, "success", "").Inc()
 	requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
 }
 
@@ -272,6 +301,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error loading proxy configuration: %v", err)
 	}
+
+	// Initialize requestDuration metric with configured buckets
+	buckets := getLatencyBuckets(config)
+	initRequestDurationMetric(buckets)
+	log.Printf("Using latency buckets: %v", buckets)
 
 	targetURL := config.TargetURL
 	requestInterval := time.Duration(config.RequestInterval) * time.Millisecond
