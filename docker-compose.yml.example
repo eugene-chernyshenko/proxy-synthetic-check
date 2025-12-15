@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  proxy-synthetic-check:
+    build: .
+    container_name: proxy-synthetic-check
+    restart: unless-stopped
+    volumes:
+      # Mount your proxies.yaml configuration file
+      - ./proxies.yaml:/app/proxies.yaml:ro
+    ports:
+      # Expose metrics port
+      - "8080:8080"
