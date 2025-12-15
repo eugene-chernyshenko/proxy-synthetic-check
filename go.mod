@@ -1,4 +1,4 @@
-module pop-syn-check
+module eugene-chernyshenko/proxy-synthetic-check
 
 go 1.23.0
 
