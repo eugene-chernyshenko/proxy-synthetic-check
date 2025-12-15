@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,15 +21,9 @@ import (
 )
 
 var (
-	requestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "requests_total",
-			Help: "Total number of requests",
-		},
-		[]string{"proxy_type", "proxy_protocol", "status", "error"},
-	)
-
+	requestsTotal   *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
+	metricLabelKeys []string // Stores label keys for building label values
 )
 
 // ProxyConfig represents the YAML configuration file structure
@@ -43,25 +38,27 @@ type ProxyConfig struct {
 
 // Proxy represents a single proxy configuration
 type Proxy struct {
-	Name string `yaml:"name"`
-	Type string `yaml:"type"` // socks5, http
-	URL  string `yaml:"url"`
+	Protocol string            `yaml:"protocol"` // socks5, http
+	Proxy    string            `yaml:"proxy"`    // username:password@host:port or host:port (no scheme)
+	Labels   map[string]string `yaml:"labels"`   // Custom labels for metrics
 }
 
 func init() {
-	prometheus.MustRegister(requestsTotal)
+	// Metrics will be initialized in main() after loading config
 }
 
 // maskAuth hides password in URL for safe output
-func maskAuth(s string) string {
-	u, err := url.Parse(s)
+func maskAuth(proxyType, proxyString string) string {
+	// Construct full URL for parsing
+	fullURL := proxyType + "://" + proxyString
+	u, err := url.Parse(fullURL)
 	if err != nil {
-		return s
+		return proxyString
 	}
 	if u.User != nil {
 		u.User = url.User(u.User.Username())
 	}
-	return u.String()
+	return u.Host // Return just host:port without scheme for display
 }
 
 func loadProxyConfig() (*ProxyConfig, error) {
@@ -105,37 +102,65 @@ func getLatencyBuckets(config *ProxyConfig) []float64 {
 	}
 }
 
-// initRequestDurationMetric initializes the requestDuration metric with custom buckets
-func initRequestDurationMetric(buckets []float64) {
+// collectLabelKeys collects all unique label keys from all proxies
+func collectLabelKeys(proxies []Proxy) []string {
+	keySet := make(map[string]bool)
+	for _, p := range proxies {
+		for key := range p.Labels {
+			keySet[key] = true
+		}
+	}
+
+	keys := make([]string, 0, len(keySet))
+	for key := range keySet {
+		keys = append(keys, key)
+	}
+
+	// Sort keys for consistent order
+	sort.Strings(keys)
+
+	return keys
+}
+
+// initMetrics initializes Prometheus metrics with collected label keys
+func initMetrics(labelKeys []string, buckets []float64) {
+	// Build label list: proxy_id, proxy_protocol, ...labelKeys..., status, error
+	requestsLabels := []string{"proxy_id", "proxy_protocol"}
+	requestsLabels = append(requestsLabels, labelKeys...)
+	requestsLabels = append(requestsLabels, "status", "error")
+
+	requestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "requests_total",
+			Help: "Total number of requests",
+		},
+		requestsLabels,
+	)
+
+	// Build label list for histogram: proxy_id, proxy_protocol, ...labelKeys...
+	durationLabels := []string{"proxy_id", "proxy_protocol"}
+	durationLabels = append(durationLabels, labelKeys...)
+
 	requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "request_duration_seconds",
 			Help:    "Request latency distribution",
 			Buckets: buckets,
 		},
-		[]string{"proxy_type", "proxy_protocol"},
+		durationLabels,
 	)
+
+	prometheus.MustRegister(requestsTotal)
 	prometheus.MustRegister(requestDuration)
 }
 
-// createProxyTransport creates HTTP transport based on proxy type
-func createProxyTransport(proxyType, proxyURL string) (*http.Transport, error) {
+// createProxyTransport creates HTTP transport based on proxy protocol
+func createProxyTransport(proxyType, proxyString string) (*http.Transport, error) {
+	// Construct full URL from protocol + proxyString (proxyString contains username:password@host:port or host:port)
+	proxyURL := proxyType + "://" + proxyString
 	proxyURI, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, err
-	}
-
-	// Ensure scheme is present
-	if proxyURI.Scheme == "" {
-		if proxyType == "socks5" {
-			proxyURL = "socks5://" + proxyURL
-		} else if proxyType == "http" {
-			proxyURL = "http://" + proxyURL
-		}
-		proxyURI, err = url.Parse(proxyURL)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	switch strings.ToLower(proxyType) {
@@ -172,7 +197,7 @@ func createProxyTransport(proxyType, proxyURL string) (*http.Transport, error) {
 		}, nil
 
 	default:
-		return nil, errors.New("unsupported proxy type: " + proxyType)
+		return nil, errors.New("unsupported proxy protocol: " + proxyType)
 	}
 }
 
@@ -232,18 +257,45 @@ func categorizeError(err error) (errorType, httpStatusCode string) {
 	return "unknown_error", ""
 }
 
-func makeRequest(client *http.Client, targetURL, proxyName, proxyType string) {
+func makeRequest(client *http.Client, targetURL, proxyID, proxyProtocol string, labels map[string]string) {
 	start := time.Now()
 
 	resp, err := client.Get(targetURL)
 	duration := time.Since(start).Seconds()
 
+	// Build label values: proxy_id, proxy_protocol, ...labelKeys..., status, error
+	buildLabelValues := func(status, errorValue string) []string {
+		values := []string{proxyID, proxyProtocol}
+		for _, key := range metricLabelKeys {
+			if val, ok := labels[key]; ok {
+				values = append(values, val)
+			} else {
+				values = append(values, "")
+			}
+		}
+		values = append(values, status, errorValue)
+		return values
+	}
+
+	// Build label values for duration: proxy_id, proxy_protocol, ...labelKeys...
+	buildDurationLabelValues := func() []string {
+		values := []string{proxyID, proxyProtocol}
+		for _, key := range metricLabelKeys {
+			if val, ok := labels[key]; ok {
+				values = append(values, val)
+			} else {
+				values = append(values, "")
+			}
+		}
+		return values
+	}
+
 	if err != nil {
 		// Categorize error
 		errorType, _ := categorizeError(err)
-		requestsTotal.WithLabelValues(proxyName, proxyType, "error", errorType).Inc()
-		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
-		log.Printf("[%s] Error making request to %s: %v", proxyName, targetURL, err)
+		requestsTotal.WithLabelValues(buildLabelValues("error", errorType)...).Inc()
+		requestDuration.WithLabelValues(buildDurationLabelValues()...).Observe(duration)
+		log.Printf("[%s] Error making request to %s: %v", proxyID, targetURL, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -252,32 +304,32 @@ func makeRequest(client *http.Client, targetURL, proxyName, proxyType string) {
 	_, err = io.Copy(io.Discard, resp.Body)
 	if err != nil {
 		// Error reading response body
-		requestsTotal.WithLabelValues(proxyName, proxyType, "error", "read_error").Inc()
-		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
-		log.Printf("[%s] Error reading response: %v", proxyName, err)
+		requestsTotal.WithLabelValues(buildLabelValues("error", "read_error")...).Inc()
+		requestDuration.WithLabelValues(buildDurationLabelValues()...).Observe(duration)
+		log.Printf("[%s] Error reading response: %v", proxyID, err)
 		return
 	}
 
 	// Check HTTP status code
 	if resp.StatusCode >= 400 {
 		errorType := "http_" + strconv.Itoa(resp.StatusCode)
-		requestsTotal.WithLabelValues(proxyName, proxyType, "error", errorType).Inc()
-		requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
-		log.Printf("[%s] HTTP error %d for request to %s", proxyName, resp.StatusCode, targetURL)
+		requestsTotal.WithLabelValues(buildLabelValues("error", errorType)...).Inc()
+		requestDuration.WithLabelValues(buildDurationLabelValues()...).Observe(duration)
+		log.Printf("[%s] HTTP error %d for request to %s", proxyID, resp.StatusCode, targetURL)
 		return
 	}
 
 	// Success
-	requestsTotal.WithLabelValues(proxyName, proxyType, "success", "").Inc()
-	requestDuration.WithLabelValues(proxyName, proxyType).Observe(duration)
+	requestsTotal.WithLabelValues(buildLabelValues("success", "")...).Inc()
+	requestDuration.WithLabelValues(buildDurationLabelValues()...).Observe(duration)
 }
 
 // runProxy starts a proxy runner that sends requests at specified interval
-func runProxy(proxyConfig Proxy, targetURL string, requestInterval, requestTimeout time.Duration) {
+func runProxy(proxyID string, proxyConfig Proxy, targetURL string, requestInterval, requestTimeout time.Duration) {
 	// Create transport for this proxy
-	transport, err := createProxyTransport(proxyConfig.Type, proxyConfig.URL)
+	transport, err := createProxyTransport(proxyConfig.Protocol, proxyConfig.Proxy)
 	if err != nil {
-		log.Fatalf("[%s] Error creating proxy transport: %v", proxyConfig.Name, err)
+		log.Fatalf("[%s] Error creating proxy transport: %v", proxyID, err)
 	}
 
 	client := &http.Client{
@@ -285,18 +337,18 @@ func runProxy(proxyConfig Proxy, targetURL string, requestInterval, requestTimeo
 		Timeout:   requestTimeout,
 	}
 
-	log.Printf("[%s] Starting proxy runner (type: %s, url: %s)", proxyConfig.Name, proxyConfig.Type, maskAuth(proxyConfig.URL))
+	log.Printf("[%s] Starting proxy runner (protocol: %s, proxy: %s)", proxyID, proxyConfig.Protocol, maskAuth(proxyConfig.Protocol, proxyConfig.Proxy))
 
 	// Create ticker for this proxy
 	ticker := time.NewTicker(requestInterval)
 	defer ticker.Stop()
 
 	// Send initial request immediately
-	go makeRequest(client, targetURL, proxyConfig.Name, proxyConfig.Type)
+	go makeRequest(client, targetURL, proxyID, proxyConfig.Protocol, proxyConfig.Labels)
 
 	// Send requests at intervals
 	for range ticker.C {
-		go makeRequest(client, targetURL, proxyConfig.Name, proxyConfig.Type)
+		go makeRequest(client, targetURL, proxyID, proxyConfig.Protocol, proxyConfig.Labels)
 	}
 }
 
@@ -307,9 +359,13 @@ func main() {
 		log.Fatalf("Error loading proxy configuration: %v", err)
 	}
 
-	// Initialize requestDuration metric with configured buckets
+	// Collect all unique label keys from all proxies
+	labelKeys := collectLabelKeys(config.Proxies)
+	metricLabelKeys = labelKeys // Store for use in makeRequest
+
+	// Initialize metrics with collected label keys
 	buckets := getLatencyBuckets(config)
-	initRequestDurationMetric(buckets)
+	initMetrics(labelKeys, buckets)
 	log.Printf("Using latency buckets: %v", buckets)
 
 	targetURL := config.TargetURL
@@ -339,9 +395,10 @@ func main() {
 	log.Printf("  Metrics port: %d", metricsPort)
 	log.Printf("  Number of proxies: %d", len(config.Proxies))
 
-	// Start each proxy in a separate goroutine
-	for _, proxyConfig := range config.Proxies {
-		go runProxy(proxyConfig, targetURL, requestInterval, requestTimeout)
+	// Start each proxy in a separate goroutine with sequential ID
+	for i, proxyConfig := range config.Proxies {
+		proxyID := "proxy_" + strconv.Itoa(i+1)
+		go runProxy(proxyID, proxyConfig, targetURL, requestInterval, requestTimeout)
 	}
 
 	// Keep main goroutine alive
