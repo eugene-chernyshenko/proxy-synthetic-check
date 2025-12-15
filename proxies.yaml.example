@@ -1,10 +1,10 @@
 target_url: https://www.cloudflare.com/cdn-cgi/trace
 request_interval_ms: 1000
-request_timeout: 30
+request_timeout: 10
 metrics_port: 8080
 # Optional: custom latency buckets for request_duration_seconds histogram
 # If not specified, defaults with better observability in 0.2-2s range will be used
-# latency_buckets: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0, 10.0, 30.0]
+# latency_buckets: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0, 10.0]
 proxies:
   - protocol: socks5
     proxy: username:password@proxy.example.com:1080
