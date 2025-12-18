@@ -25,7 +25,7 @@ func main() {
 	m := metrics.New(cfg.Proxies, buckets)
 	log.Printf("Using latency buckets: %v", buckets)
 
-	targetURL := cfg.TargetURL
+	defaultTargetURL := cfg.DefaultTargetURL
 	requestInterval := time.Duration(cfg.RequestInterval) * time.Millisecond
 	requestTimeout := time.Duration(cfg.RequestTimeout) * time.Second
 
@@ -46,7 +46,7 @@ func main() {
 	}()
 
 	log.Printf("Configuration:")
-	log.Printf("  Target URL: %s", targetURL)
+	log.Printf("  Default Target URL: %s", defaultTargetURL)
 	log.Printf("  Request interval: %v", requestInterval)
 	log.Printf("  Request timeout: %v", requestTimeout)
 	log.Printf("  Metrics port: %d", metricsPort)
@@ -55,6 +55,8 @@ func main() {
 	// Start each proxy in a separate goroutine with sequential ID
 	for i, proxyConfig := range cfg.Proxies {
 		proxyID := "proxy_" + strconv.Itoa(i+1)
+		targetURL := proxyConfig.GetTargetURL(defaultTargetURL)
+		log.Printf("[%s] Using target URL: %s", proxyID, targetURL)
 		go runner.Run(m, proxyID, proxyConfig, targetURL, requestInterval, requestTimeout)
 	}
 

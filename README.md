@@ -67,7 +67,7 @@ Configuration is done through a YAML file `proxies.yaml` in the project root. Co
 ### Configuration Structure
 
 ```yaml
-target_url: https://www.cloudflare.com/cdn-cgi/trace
+default_target_url: https://www.cloudflare.com/cdn-cgi/trace
 request_interval_ms: 1000
 request_timeout: 30
 metrics_port: 8080
@@ -76,6 +76,8 @@ latency_buckets: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0, 5.0, 10.0]
 proxies:
   - protocol: socks5
     proxy: username:password@proxy.example.com:1080
+    # Optional: target_url overrides default_target_url for this specific proxy
+    # target_url: https://example.com/custom-endpoint
     labels:
       name: wifi
       region: us
@@ -90,7 +92,7 @@ proxies:
 
 #### Global Settings
 
-- `target_url` (required): Target URL to send requests to
+- `default_target_url` (required): Default target URL to send requests to. Can be overridden per proxy using `target_url` field.
 - `request_interval_ms` (required): Interval between requests in milliseconds
 - `request_timeout` (required): Request timeout in seconds
 - `metrics_port` (optional): Port for Prometheus metrics endpoint (default: 8080)
@@ -102,6 +104,7 @@ Each proxy in the `proxies` array requires:
 
 - `protocol` (required): Proxy protocol - `socks5` or `http`
 - `proxy` (required): Proxy address in format `username:password@host:port` or `host:port` (without scheme)
+- `target_url` (optional): Target URL for this specific proxy. If not specified, `default_target_url` from root config is used.
 - `labels` (optional): Custom labels as key-value pairs for metrics filtering
 
 ### Proxy Address Format
@@ -218,7 +221,7 @@ These buckets provide better observability in the 0.2-2s range where most proxy 
 ### Basic Configuration
 
 ```yaml
-target_url: https://httpbin.org/ip
+default_target_url: https://httpbin.org/ip
 request_interval_ms: 1000
 request_timeout: 30
 metrics_port: 8080
@@ -230,7 +233,7 @@ proxies:
 ### Multiple Proxies with Custom Labels
 
 ```yaml
-target_url: https://www.cloudflare.com/cdn-cgi/trace
+default_target_url: https://www.cloudflare.com/cdn-cgi/trace
 request_interval_ms: 500
 request_timeout: 30
 metrics_port: 8080
@@ -252,7 +255,7 @@ proxies:
 ### Proxies with Authentication
 
 ```yaml
-target_url: https://example.com
+default_target_url: https://example.com
 request_interval_ms: 1000
 request_timeout: 30
 metrics_port: 8080
@@ -266,7 +269,7 @@ proxies:
 ### Custom Latency Buckets
 
 ```yaml
-target_url: https://example.com
+default_target_url: https://example.com
 request_interval_ms: 1000
 request_timeout: 30
 metrics_port: 8080

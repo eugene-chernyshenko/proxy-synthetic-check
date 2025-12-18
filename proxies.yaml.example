@@ -1,4 +1,4 @@
-target_url: https://www.cloudflare.com/cdn-cgi/trace
+default_target_url: https://www.cloudflare.com/cdn-cgi/trace
 request_interval_ms: 1000
 request_timeout: 10
 metrics_port: 8080
@@ -8,6 +8,8 @@ metrics_port: 8080
 proxies:
   - protocol: socks5
     proxy: username:password@proxy.example.com:1080
+    # Optional: target_url overrides default_target_url for this specific proxy
+    # target_url: https://example.com/custom-endpoint
     labels:
       name: wifi
       region: us

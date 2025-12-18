@@ -9,19 +9,29 @@ import (
 
 // ProxyConfig represents the YAML configuration file structure
 type ProxyConfig struct {
-	TargetURL       string    `yaml:"target_url"`
-	RequestInterval int       `yaml:"request_interval_ms"`
-	RequestTimeout  int       `yaml:"request_timeout"`
-	MetricsPort     int       `yaml:"metrics_port"`
-	LatencyBuckets  []float64 `yaml:"latency_buckets,omitempty"` // Optional custom buckets
-	Proxies         []Proxy   `yaml:"proxies"`
+	DefaultTargetURL string    `yaml:"default_target_url"`
+	RequestInterval  int       `yaml:"request_interval_ms"`
+	RequestTimeout   int       `yaml:"request_timeout"`
+	MetricsPort      int       `yaml:"metrics_port"`
+	LatencyBuckets   []float64 `yaml:"latency_buckets,omitempty"` // Optional custom buckets
+	Proxies          []Proxy   `yaml:"proxies"`
 }
 
 // Proxy represents a single proxy configuration
 type Proxy struct {
-	Protocol string            `yaml:"protocol"` // socks5, http
-	Proxy    string            `yaml:"proxy"`    // username:password@host:port or host:port (no scheme)
-	Labels   map[string]string `yaml:"labels"`   // Custom labels for metrics
+	Protocol  string            `yaml:"protocol"`             // socks5, http
+	Proxy     string            `yaml:"proxy"`                // username:password@host:port or host:port (no scheme)
+	TargetURL string            `yaml:"target_url,omitempty"` // Optional target URL (overrides default)
+	Labels    map[string]string `yaml:"labels"`               // Custom labels for metrics
+}
+
+// GetTargetURL returns the target URL for this proxy, using proxy-specific URL if set,
+// otherwise falling back to the default from config
+func (p *Proxy) GetTargetURL(defaultURL string) string {
+	if p.TargetURL != "" {
+		return p.TargetURL
+	}
+	return defaultURL
 }
 
 // Load reads and parses the configuration from proxies.yaml file

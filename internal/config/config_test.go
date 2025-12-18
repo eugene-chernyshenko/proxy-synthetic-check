@@ -33,7 +33,7 @@ func TestGetLatencyBuckets_WithDefaultBuckets(t *testing.T) {
 
 func TestParseYAML_Success(t *testing.T) {
 	configContent := `
-target_url: https://example.com
+default_target_url: https://example.com
 request_interval_ms: 1000
 request_timeout: 30
 metrics_port: 8080
@@ -55,8 +55,8 @@ proxies:
 		t.Fatalf("yaml.Unmarshal() error = %v", err)
 	}
 
-	if cfg.TargetURL != "https://example.com" {
-		t.Errorf("TargetURL = %v, want https://example.com", cfg.TargetURL)
+	if cfg.DefaultTargetURL != "https://example.com" {
+		t.Errorf("DefaultTargetURL = %v, want https://example.com", cfg.DefaultTargetURL)
 	}
 	if cfg.RequestInterval != 1000 {
 		t.Errorf("RequestInterval = %v, want 1000", cfg.RequestInterval)
@@ -101,7 +101,7 @@ proxies:
 
 func TestParseYAML_EmptyProxies(t *testing.T) {
 	configContent := `
-target_url: https://example.com
+default_target_url: https://example.com
 request_interval_ms: 1000
 request_timeout: 30
 proxies: []
@@ -120,7 +120,7 @@ proxies: []
 
 func TestParseYAML_WithLatencyBuckets(t *testing.T) {
 	configContent := `
-target_url: https://example.com
+default_target_url: https://example.com
 request_interval_ms: 1000
 request_timeout: 30
 latency_buckets: [0.1, 0.5, 1.0, 2.0]
@@ -138,5 +138,25 @@ proxies:
 	expected := []float64{0.1, 0.5, 1.0, 2.0}
 	if !reflect.DeepEqual(cfg.LatencyBuckets, expected) {
 		t.Errorf("LatencyBuckets = %v, want %v", cfg.LatencyBuckets, expected)
+	}
+}
+
+func TestProxy_GetTargetURL_WithCustomURL(t *testing.T) {
+	proxy := &Proxy{
+		TargetURL: "https://custom.example.com",
+	}
+
+	url := proxy.GetTargetURL("https://default.example.com")
+	if url != "https://custom.example.com" {
+		t.Errorf("GetTargetURL() = %v, want https://custom.example.com", url)
+	}
+}
+
+func TestProxy_GetTargetURL_WithDefaultURL(t *testing.T) {
+	proxy := &Proxy{}
+
+	url := proxy.GetTargetURL("https://default.example.com")
+	if url != "https://default.example.com" {
+		t.Errorf("GetTargetURL() = %v, want https://default.example.com", url)
 	}
 }

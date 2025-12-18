@@ -23,8 +23,8 @@ FROM alpine:latest
 # Install ca-certificates for HTTPS requests and wget for healthcheck
 RUN apk --no-cache add ca-certificates tzdata wget
 
-# Create non-root user
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Create non-root user with fixed UID
+RUN addgroup -g 1000 -S appgroup && adduser -u 1000 -S appuser -G appgroup
 
 # Set working directory
 WORKDIR /app
